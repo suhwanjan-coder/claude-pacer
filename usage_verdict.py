@@ -30,6 +30,13 @@ re-estimate periodically, never treat as a permanent constant.
 """
 import json, os, sys, time, datetime
 
+# Windows pipes default to the ANSI codepage (e.g. cp950), which mangles the
+# em-dashes in the verdict line into mojibake for whoever reads our stdout.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 if "--dir" in sys.argv:
     DIR = sys.argv[sys.argv.index("--dir") + 1]
 else:
