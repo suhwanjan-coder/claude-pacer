@@ -25,13 +25,30 @@ const STATE_FILE = path.join(DIR, 'guard-state.json');
 const CONFIG_FILE = path.join(DIR, 'config.json');
 const PACE_FILE = path.join(DIR, 'pace.json');
 
-const DEFAULTS = { soft_pct: 85, hard_pct: 93, stale_min: 15, rearm_min: 10, pace_interval_min: 15, resume_hint: null };
-// usage_verdict.py ships next to this file; macOS/Linux usually have no bare `python`
+const DEFAULTS = { soft_pct: 85, hard_pct: 93, stale_min: 15, rearm_min: 10, pace_interval_min: 15, near_reset_min: 20, resume_hint: null, builtin_auto_continue: false };
+// builtin_auto_continue:false (default since v0.1.7) = the guard arms the resume itself: hard tells
+// Claude to wrap up, arm a one-shot CronCreate (or handoff.md + resume script) and end the turn.
+// true = rely on Claude Code's built-in "Continue automatically at usage limit" (/config). It only
+// fires when the limit interrupts a RUNNING turn, so the guard must NOT tell Claude to stop: soft goes
+// silent, hard says keep working, save state, and don't launch new subagent waves (subagents do NOT
+// auto-continue — they end failed and must be resumed by the main session after the reset).
+// v0.1.6 made true the default; in real multi-session use the built-in resume never fired, hence the revert.
+// usage_verdict.py ships next to this file (or extras/usage_verdict_shim.py renamed to it, which
+// runs a single shared copy in ~/.claude/scripts/); macOS/Linux usually have no bare `python`
 const PY = process.platform === 'win32' ? 'python' : 'python3';
 const VERDICT_CMD = `${PY} "${path.join(__dirname, 'usage_verdict.py')}"`;
 
 function readJson(f, fallback) {
   try { return JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { return fallback; }
+}
+
+// HH:MM if the reset falls on the same local day as now, else MM-DD HH:MM — a reset
+// tomorrow must not read as today. Same rule as usage_verdict.py clock().
+function fmtClock(tsSec, nowMs) {
+  const t = new Date(tsSec * 1000), n = new Date(nowMs);
+  const p = (x) => String(x).padStart(2, '0');
+  const hm = `${p(t.getHours())}:${p(t.getMinutes())}`;
+  return t.toDateString() === n.toDateString() ? hm : `${p(t.getMonth() + 1)}-${p(t.getDate())} ${hm}`;
 }
 
 function emit(input, msg) {
@@ -45,7 +62,7 @@ function sevenDayNote(limits, fiveResets, now) {
   const sd = limits.seven_day;
   if (!sd || typeof sd.used_percentage !== 'number' || !sd.resets_at) return null;
   const pct = Math.round(sd.used_percentage);
-  const clock = new Date(sd.resets_at * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const clock = fmtClock(sd.resets_at, now);
   if (now / 1000 >= sd.resets_at) return `7d already reset — ignore`;
   if (sd.resets_at <= fiveResets) return `7d ${pct}% but resets ${clock}, before this 5h window ends — IGNORE, not a constraint`;
   if (pct >= 95) return `7d ${pct}% (resets ${clock}) — binding, near cap`;
@@ -59,7 +76,8 @@ function main() {
   const cfg = Object.assign({}, DEFAULTS, fileCfg.guard || fileCfg);
   const limits = readJson(LIMITS_FILE, null);
   if (!limits || !limits.five_hour) return;
-  const now = Date.now();
+  // test clock override (epoch seconds), shared with usage_verdict.py
+  const now = process.env.USAGE_VERDICT_NOW ? Number(process.env.USAGE_VERDICT_NOW) * 1000 : Date.now();
   if (now - limits.ts > cfg.stale_min * 60 * 1000) return; // stale data, stay silent
 
   const pct = limits.five_hour.used_percentage;
@@ -74,12 +92,18 @@ function main() {
   const ss = state.sessions[sid] = state.sessions[sid] || {};
 
   const remainMin = Math.max(0, Math.round((resetsAt * 1000 - now) / 60000));
-  const resetClock = new Date(resetsAt * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const resetClock = fmtClock(resetsAt, now);
   const sdNote = sevenDayNote(limits, resetsAt, now);
 
   let level = null;
   if (pct >= cfg.hard_pct) level = 'hard';
   else if (pct >= cfg.soft_pct) level = 'soft';
+
+  // Near the reset the stakes shrink: hitting the cap only pauses work for the
+  // few minutes until the window turns over — not worth ordering a wind-down.
+  if (level && remainMin <= cfg.near_reset_min) {
+    level = level === 'hard' ? 'hard_near' : null;
+  }
 
   // ---- pace mode: periodic status line even below thresholds (opt-in) ----
   const pace = readJson(PACE_FILE, null);
@@ -93,6 +117,7 @@ function main() {
       `Dispatcher: between waves run \`${VERDICT_CMD}\` (GO/PACE/STOP) — never interpret limits.json yourself.`);
     return;
   }
+  if (level === 'soft' && cfg.builtin_auto_continue !== false) level = null;  // builtin mode: no wind-down
   if (!level) return;
 
   // ---- soft/hard safety net: per-session, re-arms every rearm_min ----
@@ -107,9 +132,25 @@ function main() {
       `Start winding down: finish in-flight work, avoid starting new large/token-heavy work in this window. ` +
       `If you are a subagent/worker: complete your assigned unit at full quality — pacing is the dispatcher's decision, not yours. ` +
       `Dispatcher: run \`${VERDICT_CMD}\` before dispatching another wave. Briefly tell the user usage is at ${Math.round(pct)}%.`;
+  } else if (level === 'hard_near') {
+    msg = `[budget-guard] 5h usage at ${Math.round(pct)}%, but the window resets in ${remainMin}min (at ${resetClock}). ` +
+      `NO wind-down needed — worst case you hit the cap and pause until ${resetClock}, nothing is lost. Keep working normally; ` +
+      `just don't launch new work sized to need more headroom than that (e.g. a multi-agent wave). ` +
+      (cfg.builtin_auto_continue !== false
+        ? `If you DO hit the cap mid-task: nothing to do — Claude Code's built-in auto-continue resumes this turn after ${resetClock}. Do NOT end the turn early, do NOT arm a cron or write a handoff file.`
+        : `If you DO hit the cap mid-task: arm a one-shot resume a few minutes after ${resetClock} ` +
+          `(in Claude Code: CronCreate via ToolSearch "select:CronCreate", recurring:false) and end the turn.`);
+  } else if (cfg.builtin_auto_continue !== false) {
+    msg = `[budget-guard] 5h usage at ${Math.round(pct)}% (resets in ${remainMin}min, at ${resetClock}). You may get paused before then — that is fine. ` +
+      `(1) KEEP WORKING. Do NOT wind down and do NOT end the turn early: Claude Code's built-in auto-continue only resumes a turn that the limit interrupted, and it resumes it after ${resetClock} on its own. No CronCreate, no handoff file. ` +
+      `(2) Save in-progress state now (commit / write files) — the continuation prompt says "pick up where you stopped", so unsaved half-done work gets redone. ` +
+      `(3) Dispatcher: launch NO new subagent waves until after ${resetClock} — subagents do NOT auto-continue; one that hits the cap ends as failed and you must resume or re-dispatch it. Let running ones finish. ` +
+      `After the auto-continue fires, first check for failed subagents and resume them. ` +
+      `(4) Briefly tell the user: usage %, reset time, and that the session will auto-continue if paused.`;
   } else {
-    const headlessFallback = cfg.resume_hint
-      ? `(3) ONLY if the terminal will close: write remaining tasks + resume instructions to ${path.join(DIR, 'handoff.md')}, then run ${cfg.resume_hint}. `
+    const hint = cfg.resume_hint || defaultResumeHint();
+    const headlessFallback = hint
+      ? `(3) ONLY if the terminal will close: write remaining tasks + resume instructions to ${path.join(DIR, 'handoff.md')}, then run ${hint}. `
       : `(3) ONLY if the terminal will close: write remaining tasks + resume instructions to ${path.join(DIR, 'handoff.md')} and tell the user to restart after ${resetClock}. `;
     msg = `[budget-guard] 5h usage at ${Math.round(pct)}% — WRAP UP NOW (resets in ${remainMin}min, at ${resetClock}). ` +
       `(1) Minimal completion of the current step (commit/save state), start nothing new. ` +
@@ -121,6 +162,18 @@ function main() {
       `(4) Tell the user: usage %, reset time, which resume layer is armed. Then END THE TURN. Do NOT keep working past this point.`;
   }
   emit(input, msg);
+}
+
+// The bundled extras/ resume script for this OS, if it sits next to this file (i.e. run from a clone).
+function defaultResumeHint() {
+  try {
+    const win = process.platform === 'win32';
+    const script = win ? path.join(__dirname, 'extras', 'windows', 'schedule-resume.ps1')
+                       : path.join(__dirname, 'extras', 'unix', 'schedule-resume.sh');
+    if (!fs.existsSync(script)) return null;
+    return win ? `\`powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"\` (set $WorkDir in resume-runner.ps1 first)`
+               : `\`sh "${script}" "<project dir>"\``;
+  } catch { return null; }
 }
 
 function save(state) {

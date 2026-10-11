@@ -70,6 +70,12 @@ git clone https://github.com/drpwchen/claude-pacer.git
 }
 ```
 
+**macOS／Linux** 上，如果 Claude Code 是從 GUI 或 launch agent 啟動的，
+`node` 請填絕對路徑：那種啟動方式不會繼承你 shell profile 的 PATH，
+statusline 會安靜地不顯示。用 `which node` 取得路徑（Homebrew：
+`brew install node` → Apple Silicon 是 `/opt/homebrew/bin/node`、
+Intel 是 `/usr/local/bin/node`）。
+
 statusline 可以單獨用；想要警戒功能再加 hooks。用量百分比來自
 Claude Code 的 `rate_limits` statusline 資料（Pro/Max 訂閱才有；API key
 計費沒有這種視窗）。
@@ -143,6 +149,22 @@ state 目錄可用 `--dir <path>` 或 `$CLAUDE_PACER_DIR` 覆蓋（三支腳本�
 - **soft（85%）**：叫 Claude 收尾進行中的工作、別再開大工程。
 - **hard（93%）**：叫 Claude 立刻收尾、排一個視窗重置後幾分鐘的一次性
   resume、向使用者回報、結束回合。
+- **近重置豁免**（`near_reset_min`，預設 20）：視窗只剩 ≤20 分鐘時，
+  撞牆的代價只是暫停到重置而已——soft 警告直接靜默；hard 降級成
+  「照常工作，最壞就是短暫停一下，真撞牆再排一次性 resume」。
+- **`builtin_auto_continue`**（預設 `false`）：`false` 時由 guard 自己排續跑——
+  就是上面的 hard 警告（一次性 CronCreate；終端要關就 `handoff.md`＋resume
+  腳本）。設成 `true` 則改靠 Claude Code 內建的 **Continue automatically at
+  usage limit**（`/config`）續跑。那個功能只接回「被限制打斷」的回合，所以
+  這個模式下 guard 絕不叫 Claude 停：soft 警告靜默，hard 警告改成「繼續跑、
+  先存好進行中的狀態、別再放新的 subagent 波次」——subagent **不會**自動續跑
+  （撞牆就 failed，重置後要由主 session resume）。v0.1.6 曾以 `true` 為預設；
+  作者的多 session 實際使用中內建續跑從沒觸發過，v0.1.7 改回——確定它在你的
+  環境真的會動再開。
+- **限制：guard 只跟得上取樣速度。** 用量是在 statusline 渲染時才讀到（約 2
+  分鐘一次）。一群 agent 每分鐘燒好幾 % 時，可能兩次取樣之間就從 93% 以下
+  直接撞牆——警告來不及送到，也就排不了續跑。這種批次請用
+  `usage_verdict.py`／配速模式控制派工，別指望 hard 警告。
 - 警告**每個 session 各自觸發、每 10 分鐘重新武裝**——多個並行
   session/agent 都聽得到，不會只有第一個聽到。
 - 視窗已重置時保持沉默（過期的高數字不會誤報）。
@@ -156,19 +178,38 @@ state 目錄可用 `--dir <path>` 或 `$CLAUDE_PACER_DIR` 覆蓋（三支腳本�
 
 ```
 $ python3 usage_verdict.py     # Windows 用 `python`
-GO — 5h at 42%, 133 min left, projected ~61% at reset — headroom available, can dispatch more. [7d: 71% — not near cap, ignore] (...)
+GO — 5h at 42%, 133 min left, behind pace (0.75 = 42% used / 56% elapsed), projected ~75% at reset. [7d: 7d 71% (resets 10-09 13:00) — not near cap, ignore] headroom available, can dispatch more. (...)
 ```
 
 Exit code：0=GO、1=PACE、2=STOP、3=無資料。`--json` 給程式吃。
+輸出順序固定：判定 → 核心理由 → `[7d: …]` → 選用的補充說明。呼叫端就算
+把整行截短（例如只留 200 字），7d 那段也還在。
 
-為什麼要腳本、不直接看數字？因為 agent（跟人）常犯三個錯：
+為什麼要腳本、不直接看數字？因為 agent（跟人）常犯四個錯：
 
 1. **重置算術** — `limits.json` 只在 statusline 渲染時更新，重置後仍顯示
    舊的 90 幾 %。只要 `now > resets_at`，用量就是 ~0%，不必花 token 驗證。
 2. **7d 假警報** — 7d 視窗若在目前 5h 視窗結束「之前」就重置，再高的
    7d % 都不構成限制。判定會幫你忽略。
-3. **燒速外插** — 多 agent 突發派工下線性外插是「下限」，所以硬門檻
-   永遠優先。
+3. **看配速，不只看燒速** — *pace*＝已用 % ÷ 5h 視窗已過時間 %（小於 1
+   ＝落後進度、還有餘裕）。投影取「整個視窗的平均速率」和「近 30 分鐘趨勢
+   （只外插到取樣涵蓋的長度）」兩者較大的那個。只靠投影超標，要 pace ≥ 0.9
+   才判 PACE——落後進度時的一波突發派工只會被報告，不會被當成要減速。
+   視窗開頭 20 分鐘內，投影不會單獨觸發 PACE（開窗 1 分鐘用 1% 會「投影」
+   出 300%），只看 soft 門檻。硬門檻 STOP 一樣永遠優先。
+4. **把明天的重置看成今天** — 重置時刻跟現在同一天時印 `HH:MM`，不同天印
+   `MM-DD HH:MM`。`budget-guard.cjs` 的警告用同一套規則。
+
+`USAGE_VERDICT_NOW=<epoch 秒>` 可以固定時鐘（`usage_verdict.py` 和
+`budget-guard.cjs` 都吃）；`test_usage_verdict.py` 就是靠它（只用標準庫：
+`python3 test_usage_verdict.py`）。
+
+**只留一份正本（選用）。** `budget-guard.cjs` 叫 agent 跑的是它旁邊那支
+`usage_verdict.py`。如果你也想在共用位置呼叫判定（其他腳本、dispatcher、
+dotfiles repo），把正本裝成 `~/.claude/scripts/usage_verdict.py`，再把
+`extras/usage_verdict_shim.py` 以 `usage_verdict.py` 的檔名複製到
+`budget-guard.cjs` 旁邊（`~/.claude/hooks/<資料夾>/`）。shim 會帶著同樣的
+參數執行正本，輸出和 exit code 都一樣，要改只改正本那一份。
 
 `--ratio` 從累積的歷史資料實測你方案的 7d/5h 額度比——排多天批次工作
 時有用（兩個視窗官方是獨立的，沒有公開換算式）。
@@ -176,7 +217,9 @@ Exit code：0=GO、1=PACE、2=STOP、3=無資料。`--json` 給程式吃。
 ## 硬上限後自動續跑（extras）
 
 hard 警戒觸發且終端必須關閉時，Claude 寫好 `handoff.md`，排程在視窗
-重置後幾分鐘用 `claude -p` 繼續工作：
+重置後幾分鐘用 `claude -p` 繼續工作。沒設 `resume_hint` 時，guard 會自動
+指名你這個 OS 的腳本（前提是 `extras/` 跟 `budget-guard.cjs` 放在一起，
+也就是直接從 clone 下來的目錄執行）：
 
 - **Windows** — `extras/windows/` 註冊一次性 Scheduled Task（關終端、
   登出都撐得住）。使用前改一下工作目錄那行。
@@ -191,6 +234,25 @@ hard 警戒觸發且終端必須關閉時，Claude 寫好 `handoff.md`，排程�
 256 KB 自動修剪）、`topics.json`（主題快取）、`guard-state.json`，加上
 你自己的 `config.json`／`pace.json`。完全本機，任何地方都沒有網路呼叫。
 
+## 🌱 AI agent 新手起點
+
+這個工具是我個人 AI 工作流的一部分。想從零開始學怎麼用 Claude Code 這類 AI
+agent（不需要程式背景），可以從我的入門系列開始：
+
+1. [從零開始：安裝、看懂 GitHub、跑起你的第一個工具](https://drpwchen.com/posts/getting-started/)
+2. [怎麼跟 AI agent 講話：心法、元技能與規則檔](https://drpwchen.com/posts/talking-to-agents/)
+3. [自動化流程不是設計出來的，是長出來的](https://drpwchen.com/posts/growing-your-workflow/)
+
+這個工具本身的來龍去脈 →
+[為什麼我需要一個會踩煞車的 statusline](https://drpwchen.com/posts/claude-pacer/)
+
+所有工具與文章的全貌 → [drpwchen.com/map](https://drpwchen.com/map/)
+
 ## License
 
 MIT
+
+## Support 支持
+
+覺得這個工具有幫助嗎？歡迎[請我喝飲料](https://drpwchen.com/support/) 🧋
+If this tool helped you, you can [buy me a drink](https://drpwchen.com/en/support/).

@@ -77,6 +77,12 @@ In `~/.claude/settings.json`:
 }
 ```
 
+On **macOS / Linux**, use an absolute path to `node` if Claude Code is
+launched from a GUI or a launch agent: that process may not inherit the PATH
+from your shell profile, and the statusline then silently renders nothing.
+`which node` gives you the path to paste (Homebrew: `brew install node` →
+`/opt/homebrew/bin/node` on Apple Silicon, `/usr/local/bin/node` on Intel).
+
 The statusline works on its own; add the hooks only if you want the guard.
 Usage percentages come from Claude Code's `rate_limits` statusline data, which
 exists on Pro/Max subscriptions (API-key billing has no such windows).
@@ -156,6 +162,28 @@ long autonomous runs). Reads `limits.json` written by the statusline.
 - **soft (85%)**: tells Claude to finish in-flight work and start nothing big.
 - **hard (93%)**: tells Claude to wrap up NOW, schedule a one-shot resume a few
   minutes after the window resets, report to the user, and end the turn.
+- **Near-reset exemption** (`near_reset_min`, default 20): with ≤20 min left in
+  the window the stakes shrink — hitting the cap only pauses work until the
+  reset. The soft warning goes silent; the hard one downgrades to "work
+  normally, worst case is a brief pause, arm a one-shot resume if capped".
+- **`builtin_auto_continue`** (default `false`): with `false` the guard arms
+  the resume itself — the hard warning above (one-shot CronCreate, or
+  `handoff.md` + the resume script if the terminal will close). Set `true` to
+  rely on Claude Code's own **Continue automatically at usage limit**
+  (`/config`) instead. That feature only resumes a turn the limit
+  *interrupted*, so in this mode the guard never tells Claude to stop: the soft
+  warning goes silent, and the hard one says keep working, save in-progress
+  state, and launch no new subagent waves — subagents do **not** auto-continue
+  (they end as failed and the main session must resume them after the reset).
+  `true` was the default in v0.1.6; in the author's multi-session setup the
+  built-in resume never fired, so v0.1.7 reverted it — try it only if you've
+  seen it work for you.
+- **Limit: the guard is only as fast as its samples.** Usage is read when a
+  statusline renders (~every 2 min). A fleet of agents burning several %/min
+  can go from below 93% straight to the cap between two samples; then no
+  warning lands in time and no resume gets armed. For such runs, pace the
+  dispatch with `usage_verdict.py` / pace mode rather than relying on the
+  hard warning.
 - Warnings are **per-session and re-arm every 10 min**, so every concurrently
   running session/agent hears them — not just the first one.
 - Silent when the window has already reset (stale-high data can't false-fire).
@@ -170,12 +198,15 @@ Thresholds and intervals are in the `guard` section of `config.json`.
 
 ```
 $ python3 usage_verdict.py     # `python` on Windows
-GO — 5h at 42%, 133 min left, projected ~61% at reset — headroom available, can dispatch more. [7d: 71% — not near cap, ignore] (...)
+GO — 5h at 42%, 133 min left, behind pace (0.75 = 42% used / 56% elapsed), projected ~75% at reset. [7d: 7d 71% (resets 10-09 13:00) — not near cap, ignore] headroom available, can dispatch more. (...)
 ```
 
 Exit codes: 0 = GO, 1 = PACE, 2 = STOP, 3 = no data. `--json` for machine use.
+The line always starts with the verdict, then the core reason, then the
+`[7d: …]` note, then optional detail — so a caller that truncates the line
+(say to 200 characters) still keeps the 7d note.
 
-Why a script instead of just reading the numbers? Three mistakes agents (and
+Why a script instead of just reading the numbers? Four mistakes agents (and
 humans) make constantly:
 
 1. **Reset arithmetic** — `limits.json` only refreshes when a statusline
@@ -183,8 +214,30 @@ humans) make constantly:
    `now > resets_at`, usage is ~0%; no need to spend tokens "verifying".
 2. **7d false alarms** — a high 7d % is meaningless when the 7d window resets
    *before* the current 5h window ends. The verdict ignores it for you.
-3. **Burn projection** — linear projection from recent samples is a *lower
-   bound* under bursty multi-agent dispatch, so the hard STOP threshold rules.
+3. **Pace, not just burn** — *pace* = used % ÷ elapsed % of the 5h window
+   (below 1 = behind pace, there is headroom). The projection takes the
+   larger of the whole-window average rate and the last 30 minutes' trend
+   (extrapolated only as far as it was sampled). A projected overrun on its
+   own means PACE only when pace ≥ 0.9 — a dispatch burst while you are
+   behind pace is reported, not acted on. In the first 20 minutes of a window
+   the projection never triggers PACE by itself (1% after 1 minute would
+   "project" 300%); only the soft threshold does. The hard STOP threshold
+   rules either way.
+4. **Reading tomorrow's reset as today's** — reset times print `HH:MM` when
+   they fall on today's date and `MM-DD HH:MM` otherwise. `budget-guard.cjs`
+   uses the same rule in its warnings.
+
+`USAGE_VERDICT_NOW=<epoch seconds>` pins the clock (for both
+`usage_verdict.py` and `budget-guard.cjs`); `test_usage_verdict.py` uses it
+(stdlib only: `python3 test_usage_verdict.py`).
+
+**One shared copy (optional).** `budget-guard.cjs` tells agents to run the
+`usage_verdict.py` next to it. If you also want the verdict at a shared path
+(other scripts, a dispatcher, a dotfiles repo), install the real file as
+`~/.claude/scripts/usage_verdict.py` and copy `extras/usage_verdict_shim.py`
+next to `budget-guard.cjs` (in `~/.claude/hooks/<folder>/`) as
+`usage_verdict.py`. The shim runs the real file with the same arguments,
+output and exit code, so there is only one copy to edit.
 
 `--ratio` estimates your plan's 7d/5h cap ratio empirically from collected
 history — useful for planning multi-day batch jobs (the two windows are
@@ -194,7 +247,9 @@ officially independent; no published conversion exists).
 
 When the hard guard fires and the terminal must close, Claude writes a
 `handoff.md` and schedules `claude -p` to continue the work a few minutes
-after the window resets:
+after the window resets. With no `resume_hint` set, the guard names the
+script for your OS automatically (when `extras/` sits next to
+`budget-guard.cjs`, i.e. you run it from the clone):
 
 - **Windows** — `extras/windows/` registers a one-shot Scheduled Task
   (survives terminal exit and logout). Adapt the working-directory line
@@ -211,6 +266,26 @@ samples, ~2 min interval, auto-trimmed at 256 KB), `topics.json` (topic cache),
 `guard-state.json`, and your `config.json` / `pace.json`. Nothing leaves your
 machine; there are no network calls anywhere.
 
+## 🌱 Start here if you're new to AI agents
+
+This tool is one piece of my personal AI workflow. If you want to learn how to
+use AI agents like Claude Code from zero (no programming background needed), I
+wrote a beginner series (in Traditional Chinese):
+
+1. [從零開始：安裝、看懂 GitHub、跑起你的第一個工具](https://drpwchen.com/posts/getting-started/)
+2. [怎麼跟 AI agent 講話：心法、元技能與規則檔](https://drpwchen.com/posts/talking-to-agents/)
+3. [自動化流程不是設計出來的，是長出來的](https://drpwchen.com/posts/growing-your-workflow/)
+
+The story behind this particular tool →
+[為什麼我需要一個會踩煞車的 statusline](https://drpwchen.com/posts/claude-pacer/)
+
+Full map of my tools and posts → [drpwchen.com/map](https://drpwchen.com/map/)
+
 ## License
 
 MIT
+
+## Support 支持
+
+覺得這個工具有幫助嗎？歡迎[請我喝飲料](https://drpwchen.com/support/) 🧋
+If this tool helped you, you can [buy me a drink](https://drpwchen.com/en/support/).
