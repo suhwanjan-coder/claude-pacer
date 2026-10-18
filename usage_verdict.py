@@ -32,7 +32,9 @@ State dir: --dir <path> > $CLAUDE_PACER_DIR > ~/.claude/claude-pacer
 
 Usage:  python usage_verdict.py [--json] [--dir <path>]
         python usage_verdict.py --ratio   # estimate 7d/5h cap ratio
+        python usage_verdict.py --gate    # unattended-job headroom/peak brake
 Exit codes: 0=GO, 1=PACE, 2=STOP, 3=no data.
+With --gate: 0=ALLOW, 10=BLOCK; config.json's gate block controls the policy.
 Test clock: $USAGE_VERDICT_NOW (epoch seconds) overrides now.
 
 --ratio: empirically estimates cap_7d/cap_5h from limits-history.jsonl. Both
@@ -122,7 +124,67 @@ def estimate_ratio():
     return 0
 
 
+GATE_DEFAULTS = {
+    "headroom_7d_pp": 10, "headroom_5h_pp": 0,
+    "peak_hour_gate_enabled": True, "peak_start": "21:00", "peak_end": "02:00",
+    "tz_offset_hours": 8, "fail_open_when_no_data": True,
+}
+
+
+def gate():
+    """Independent preflight for unattended jobs; never infer one window from another."""
+    cfg = dict(GATE_DEFAULTS)
+    try:
+        with open(CONFIG, encoding="utf-8-sig") as f:
+            cfg.update(json.load(f).get("gate", {}))
+    except (OSError, ValueError, TypeError):
+        pass
+
+    def result(allow, reason):
+        verdict = "ALLOW" if allow else "BLOCK"
+        out = {"gate": verdict, "reason": reason}
+        print(json.dumps(out) if "--json" in sys.argv else "GATE %s: %s" % (verdict, reason))
+        return 0 if allow else 10
+
+    local = datetime.datetime.fromtimestamp(
+        NOW, datetime.timezone(datetime.timedelta(hours=cfg["tz_offset_hours"])))
+    hhmm = local.strftime("%H:%M")
+    start, end = cfg["peak_start"], cfg["peak_end"]
+    peak = start <= hhmm < end if start < end else hhmm >= start or hhmm < end
+    if cfg["peak_hour_gate_enabled"] and peak:
+        return result(False, "peak hours %s-%s (UTC%+g)" % (start, end, cfg["tz_offset_hours"]))
+    try:
+        with open(LIMITS, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    notes = []
+    for key, label, duration, headroom in (
+            ("seven_day", "7d", 7 * 86400, cfg["headroom_7d_pp"]),
+            ("five_hour", "5h", 5 * 3600, cfg["headroom_5h_pp"])):
+        window = data.get(key) or {}
+        pct, resets = window.get("used_percentage"), window.get("resets_at")
+        if pct is None or not resets:
+            continue
+        if NOW >= resets:
+            notes.append("%s already reset; treated as 0%%" % label)
+            continue
+        elapsed = max(0.0, min(1.0, (NOW - (resets - duration)) / duration))
+        ceiling = elapsed * 100 - headroom
+        note = "%s %.2f%% used; allowance %.2f%% (elapsed %.2f%% minus %g pp)" % (
+            label, pct, ceiling, elapsed * 100, headroom)
+        if pct > ceiling:
+            return result(False, note)
+        notes.append(note)
+    if not notes:
+        allow = cfg["fail_open_when_no_data"]
+        return result(allow, "no-data (fail-open)" if allow else "no-data (fail-closed)")
+    return result(True, "; ".join(notes))
+
+
 def main():
+    if "--gate" in sys.argv:
+        return gate()
     if "--ratio" in sys.argv:
         return estimate_ratio()
     as_json = "--json" in sys.argv

@@ -281,6 +281,19 @@ The story behind this particular tool →
 
 Full map of my tools and posts → [drpwchen.com/map](https://drpwchen.com/map/)
 
+## Scheduled-job token brake
+
+Run `python3 usage_verdict.py --gate` before unattended jobs: one line
+`GATE ALLOW: <reason>` (exit 0) or `GATE BLOCK: <reason>` (exit 10).
+Add `--json` for a dictionary. Existing modes and exit codes are unchanged.
+The state-dir config's `gate` block defaults to 7d headroom 10 percentage
+points, 5h headroom 0, and peak hours 21:00 inclusive to 02:00 exclusive at UTC+8.
+Each available window is checked independently against elapsed pace minus
+headroom; expired windows count as 0%. With neither window available,
+`fail_open_when_no_data=true` allows with `no-data (fail-open)`; false blocks.
+Peak hours block even without data. See `config.example.json` for all defaults.
+`USAGE_VERDICT_NOW` pins the clock. On Windows use `python`.
+
 ## License
 
 MIT

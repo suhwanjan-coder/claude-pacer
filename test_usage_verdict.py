@@ -79,6 +79,73 @@ def linear(start, end, p0, p1, step=120):
     return [(start + i * step, round(p0 + (p1 - p0) * i / n)) for i in range(n + 1)]
 
 
+class GateTests(unittest.TestCase):
+    def gate(self, data=None, config=None, hhmm="12:00", text=False):
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        h, m = map(int, hhmm.split(":"))
+        now = datetime.datetime(2026, 10, 18, h, m, tzinfo=tz).timestamp()
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            if data is not None:
+                with open(os.path.join(directory, "limits.json"), "w", encoding="utf-8") as f:
+                    json.dump(data(now), f)
+            with open(os.path.join(directory, "config.json"), "w", encoding="utf-8") as f:
+                json.dump({"gate": config or {}}, f)
+            args = [sys.executable, SCRIPT, "--dir", directory, "--gate"]
+            if not text:
+                args.append("--json")
+            r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                               env=dict(os.environ, USAGE_VERDICT_NOW=str(now)))
+            self.assertEqual(r.stderr, "")
+            self.assertEqual(len(r.stdout.splitlines()), 1)
+            return r.returncode, r.stdout.strip() if text else json.loads(r.stdout)
+
+    def test_peak_both_sides_and_boundaries(self):
+        for hhmm in ("21:00", "23:59", "00:00", "01:59"):
+            with self.subTest(hhmm=hhmm):
+                code, out = self.gate(hhmm=hhmm)
+                self.assertEqual(code, 10)
+                self.assertIn("peak hours", out["reason"])
+        for hhmm in ("20:59", "02:00"):
+            self.assertEqual(self.gate(hhmm=hhmm)[0], 0)
+        self.assertEqual(self.gate(hhmm="23:00", config={"peak_hour_gate_enabled": False})[0], 0)
+
+    def test_7d_pace_without_5h(self):
+        for pct, code in ((39, 0), (40, 0), (41, 10)):
+            actual, out = self.gate(lambda now: {"seven_day": {
+                "used_percentage": pct, "resets_at": now + 3.5 * 86400}})
+            self.assertEqual(actual, code)
+            self.assertIn("allowance 40.00%", out["reason"])
+
+    def test_5h_pace_and_configured_headroom(self):
+        for pct, code in ((49, 0), (50, 0), (51, 10)):
+            self.assertEqual(self.gate(lambda now: {"five_hour": {
+                "used_percentage": pct, "resets_at": now + 2.5 * 3600}})[0], code)
+        self.assertEqual(self.gate(lambda now: {"five_hour": {
+            "used_percentage": 45, "resets_at": now + 2.5 * 3600}},
+            config={"headroom_5h_pp": 10})[0], 10)
+
+    def test_reset_passed_or_exact(self):
+        for delta in (-1, 0):
+            code, out = self.gate(lambda now: {key: {
+                "used_percentage": 99, "resets_at": now + delta}
+                for key in ("five_hour", "seven_day")})
+            self.assertEqual(code, 0)
+            self.assertIn("treated as 0%", out["reason"])
+
+    def test_missing_data_policy_and_text(self):
+        for data in (None, lambda now: {"five_hour": None, "seven_day": None}):
+            self.assertEqual(self.gate(data, text=True), (0, "GATE ALLOW: no-data (fail-open)"))
+            self.assertEqual(self.gate(data, {"fail_open_when_no_data": False}, text=True),
+                             (10, "GATE BLOCK: no-data (fail-closed)"))
+
+    def test_windows_independent(self):
+        code, out = self.gate(lambda now: {
+            "seven_day": {"used_percentage": 20, "resets_at": now + 3.5 * 86400},
+            "five_hour": {"used_percentage": 80, "resets_at": now + 2.5 * 3600}})
+        self.assertEqual(code, 10)
+        self.assertIn("5h", out["reason"])
+
+
 class T(unittest.TestCase):
     def replay(self, hms):
         now = at(hms)

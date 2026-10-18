@@ -248,6 +248,18 @@ agent（不需要程式背景），可以從我的入門系列開始：
 
 所有工具與文章的全貌 → [drpwchen.com/map](https://drpwchen.com/map/)
 
+## 排程任務 token 煞車
+
+排程前執行 `python3 usage_verdict.py --gate`，輸出一行
+`GATE ALLOW: <reason>`（退出碼 0）或 `GATE BLOCK: <reason>`（退出碼 10）。
+加 `--json` 改輸出字典，原有模式與退出碼不變。Windows 使用 `python`。
+state 目錄 config 的 `gate` 區塊預設 7d 餘裕 10 個百分點、5h 餘裕 0，
+UTC+8 每晚 21:00（含）至 02:00（不含）禁止執行。
+兩個視窗各自依「已過時間比例減餘裕」檢查可用資料，已重置視為 0%。
+兩者都無資料時，`fail_open_when_no_data=true` 放行並顯示
+`no-data (fail-open)`；設 false 則阻擋。尖峰時段即使無資料仍阻擋。
+完整預設值見 `config.example.json`，測試可用 `USAGE_VERDICT_NOW` 固定時鐘。
+
 ## License
 
 MIT

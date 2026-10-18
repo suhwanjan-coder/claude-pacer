@@ -17,5 +17,14 @@
     "near_reset_min": 20,
     "resume_hint": null,
     "builtin_auto_continue": false
+  },
+  "gate": {
+    "headroom_7d_pp": 10,
+    "headroom_5h_pp": 0,
+    "peak_hour_gate_enabled": true,
+    "peak_start": "21:00",
+    "peak_end": "02:00",
+    "tz_offset_hours": 8,
+    "fail_open_when_no_data": true
   }
 }
