@@ -64,7 +64,8 @@ CONFIG = os.path.join(DIR, "config.json")
 SOFT, HARD, NEAR_RESET = 85, 93, 20
 EARLY_MIN = 20  # window minutes before the projection may trigger PACE by itself
 try:
-    cfg = json.load(open(CONFIG))
+    with open(CONFIG, encoding="utf-8-sig") as f:
+        cfg = json.load(f)
     cfg = cfg.get("guard", cfg)
     SOFT = cfg.get("soft_pct", SOFT); HARD = cfg.get("hard_pct", HARD)
     NEAR_RESET = cfg.get("near_reset_min", NEAR_RESET)
@@ -73,6 +74,18 @@ except Exception:
 
 
 NOW = float(os.environ.get("USAGE_VERDICT_NOW") or time.time())
+
+
+def num(x):
+    """x if it is a real number (bool excluded), else None — hand-edited or corrupt files must
+    read as missing data, never crash (a traceback exits 1, which callers read as PACE)."""
+    return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+
+def block(d, key):
+    """d[key] if both are JSON objects, else {}."""
+    v = d.get(key) if isinstance(d, dict) else None
+    return v if isinstance(v, dict) else {}
 
 
 def clock(ts):
@@ -93,8 +106,10 @@ def estimate_ratio():
                     s = json.loads(line)
                 except Exception:
                     continue
-                if s.get("pct") is None or s.get("sd_pct") is None:
+                if not isinstance(s, dict) or s.get("pct") is None or s.get("sd_pct") is None:
                     continue
+                if num(s.get("ts")) is None:
+                    continue  # undated sample: cannot be ordered, so it must not pick the endpoints
                 groups.setdefault((s.get("resets_at"), s.get("sd_resets")), []).append(s)
     except FileNotFoundError:
         print("NO-DATA: no limits-history.jsonl yet.")
@@ -162,8 +177,8 @@ def gate():
     for key, label, duration, headroom in (
             ("seven_day", "7d", 7 * 86400, cfg["headroom_7d_pp"]),
             ("five_hour", "5h", 5 * 3600, cfg["headroom_5h_pp"])):
-        window = data.get(key) or {}
-        pct, resets = window.get("used_percentage"), window.get("resets_at")
+        window = block(data, key)
+        pct, resets = num(window.get("used_percentage")), num(window.get("resets_at"))
         if pct is None or not resets:
             continue
         if NOW >= resets:
@@ -190,15 +205,16 @@ def main():
     as_json = "--json" in sys.argv
     now = NOW
     try:
-        d = json.load(open(LIMITS))
+        with open(LIMITS, encoding="utf-8-sig") as f:
+            d = json.load(f)
     except Exception:
         print("NO-DATA: limits.json unreadable — no statusline has rendered yet. "
               "Treat as unknown; do NOT invent numbers.")
         return 3
 
     out = {"now": clock(now)}
-    fh = d.get("five_hour") or {}
-    pct, resets = fh.get("used_percentage"), fh.get("resets_at")
+    fh = block(d, "five_hour")
+    pct, resets = num(fh.get("used_percentage")), num(fh.get("resets_at"))
 
     # ---- 5h window ----
     if pct is None or not resets:
@@ -217,8 +233,8 @@ def main():
     out["five_hour"] = {"pct": pct, "resets_at": clock(resets), "remain_min": remain_min}
 
     # ---- 7d window ----
-    sd = d.get("seven_day") or {}
-    sd_pct, sd_resets = sd.get("used_percentage"), sd.get("resets_at")
+    sd = block(d, "seven_day")
+    sd_pct, sd_resets = num(sd.get("used_percentage")), num(sd.get("resets_at"))
     sd_note = None
     sd_binding = False
     if sd_pct is not None and sd_resets:

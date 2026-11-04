@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **`usage_verdict.py` no longer crashes on odd `limits.json` / config content.**
+  A non-object file (`null`, `[]`), a non-numeric `used_percentage` /
+  `resets_at`, or a `seven_day` block of the wrong type used to raise a
+  traceback and exit 1 — which callers read as PACE. They now read as missing
+  data (`NO-DATA`, exit 3; `--gate` follows `fail_open_when_no_data`).
+- **UTF-8 BOM is accepted** in `limits.json` and `config.json` (PowerShell
+  `Set-Content` writes one). Before, the verdict treated a BOM'd `limits.json`
+  as NO-DATA and silently ignored a BOM'd config, while `--gate` read both.
+- `--ratio` tolerates history samples without a `ts`.
+- **`budget-guard.cjs` and `usage_verdict.py` agree on the near-reset band.**
+  The guard rounded the minutes left, the verdict truncated them, so with
+  20m30s-20m59s left the verdict said "near reset, work normally" while the
+  guard still told Claude to wind down. The guard now truncates too.
+- New `tests/` pytest suite (synthetic data only; needs `pip install pytest`).
+
 ## v0.1.8 — 2026-10-06
 
 - **`usage_verdict.py` is pace-aware.** It now reports *pace* (used % ÷
