@@ -106,8 +106,10 @@ def estimate_ratio():
                     s = json.loads(line)
                 except Exception:
                     continue
-                if s.get("pct") is None or s.get("sd_pct") is None:
+                if not isinstance(s, dict) or s.get("pct") is None or s.get("sd_pct") is None:
                     continue
+                if num(s.get("ts")) is None:
+                    continue  # undated sample: cannot be ordered, so it must not pick the endpoints
                 groups.setdefault((s.get("resets_at"), s.get("sd_resets")), []).append(s)
     except FileNotFoundError:
         print("NO-DATA: no limits-history.jsonl yet.")
@@ -116,7 +118,7 @@ def estimate_ratio():
     for key, ss in groups.items():
         if None in key or len(ss) < 2:
             continue
-        ss.sort(key=lambda s: num(s.get("ts")) or 0)
+        ss.sort(key=lambda s: s["ts"])
         a, b = ss[0], ss[-1]
         if b["pct"] >= a["pct"] and b["sd_pct"] >= a["sd_pct"]:
             d5 += b["pct"] - a["pct"]

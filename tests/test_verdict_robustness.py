@@ -163,3 +163,14 @@ def test_ratio_sample_without_ts():
     h = _pair(1, 9, 0, 30, 0, 6) + [{"pct": 5, "sd_pct": 1, "resets_at": 1, "sd_resets": 9}]
     r = ratio(h)
     assert r.returncode in (0, NO_DATA) and r.stderr == ""
+
+
+def test_ratio_undated_sample_does_not_invalidate_dated_pair():
+    # An undated sample with a higher reading must not become an endpoint (regression for review finding):
+    # dated pair (0,0)->(30,6) gives 5.0; the undated (40,8) must simply be ignored.
+    h = [{"ts": 1000, "pct": 0, "sd_pct": 0, "resets_at": 1, "sd_resets": 9},
+         {"ts": 2000, "pct": 30, "sd_pct": 6, "resets_at": 1, "sd_resets": 9},
+         {"pct": 40, "sd_pct": 8, "resets_at": 1, "sd_resets": 9}]
+    r = ratio(h)
+    assert r.returncode == 0 and r.stderr == ""
+    assert "cap_7d/cap_5h ~= 5.0" in r.stdout and "1 window-pairs" in r.stdout
