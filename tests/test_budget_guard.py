@@ -226,9 +226,6 @@ def test_guard_and_verdict_agree_on_near_reset_at_whole_minutes(pct, remain_sec)
     assert guard_says_wind_down == verdict_says_wind_down, (v.text, ctx)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG B5: guard computes remainMin with Math.round, verdict with int() "
-                                       "truncation, so for 20m30s-20m59s left the verdict applies the near-reset "
-                                       "exemption (GO) while the guard still injects a soft wind-down")
 def test_guard_and_verdict_agree_inside_the_rounding_band():
     limits = {"ts": NOW * 1000, "five_hour": {"used_percentage": 90, "resets_at": NOW + 20 * MIN + 45},
               "seven_day": seven_day(10, 100)}

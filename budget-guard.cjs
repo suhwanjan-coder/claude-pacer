@@ -91,7 +91,8 @@ function main() {
   state.sessions = state.sessions || {};
   const ss = state.sessions[sid] = state.sessions[sid] || {};
 
-  const remainMin = Math.max(0, Math.round((resetsAt * 1000 - now) / 60000));
+  // whole minutes, truncated — same as usage_verdict.py int(), so both agree on the near-reset band
+  const remainMin = Math.max(0, Math.floor((resetsAt * 1000 - now) / 60000));
   const resetClock = fmtClock(resetsAt, now);
   const sdNote = sevenDayNote(limits, resetsAt, now);
 

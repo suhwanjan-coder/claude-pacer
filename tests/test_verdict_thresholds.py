@@ -187,8 +187,6 @@ def test_broken_config_falls_back_to_defaults(raw):
     assert r.code == STOP
 
 
-@pytest.mark.xfail(strict=True, reason="BUG B3: verdict reads config.json without utf-8-sig, so a BOM'd config "
-                   "(Windows editors) is silently ignored while --gate honours it")
 def test_config_with_utf8_bom_is_honoured():
     r = v(86, raw_config=b'\xef\xbb\xbf{"soft_pct": 99}')
     assert r.code == GO  # soft_pct 99 should apply

@@ -64,8 +64,6 @@ BAD_TYPES = [
 
 
 @pytest.mark.parametrize("limits", BAD_TYPES)
-@pytest.mark.xfail(strict=True, reason="BUG B1: wrongly typed five_hour fields raise TypeError/AttributeError "
-                                       "(traceback, exit 1 == looks like PACE) instead of NO-DATA/3")
 def test_wrongly_typed_five_hour_is_clean_no_data(limits):
     r = verdict(limits)
     assert r.code == NO_DATA
@@ -73,24 +71,18 @@ def test_wrongly_typed_five_hour_is_clean_no_data(limits):
 
 
 @pytest.mark.parametrize("raw", ["[]", "null", "42", '"str"', "true"])
-@pytest.mark.xfail(strict=True, reason="BUG B2: valid JSON that is not an object ([] / null / 42 ...) "
-                                       "crashes with AttributeError (exit 1) instead of NO-DATA/3")
 def test_non_object_limits_json_is_clean_no_data(raw):
     r = verdict(raw_limits=raw)
     assert r.code == NO_DATA
     assert r.stderr == ""
 
 
-@pytest.mark.xfail(strict=True, reason="BUG B1: seven_day of the wrong type (list) raises AttributeError and "
-                                       "takes the whole 5h verdict down with it")
 def test_seven_day_wrong_type_is_tolerated_or_ignored():
     # 7d block of the wrong type must not take down the 5h verdict
     r = verdict({"five_hour": five_hour(40, 150), "seven_day": [1]})
     assert r.stderr == ""
 
 
-@pytest.mark.xfail(strict=True, reason="BUG B3: main() reads limits.json without utf-8-sig, so a BOM'd file "
-                                       "(PowerShell Set-Content) is NO-DATA while --gate parses the same file")
 def test_limits_with_bom_is_readable_like_gate_does():
     raw = b"\xef\xbb\xbf" + json.dumps({"five_hour": five_hour(40, 150)}).encode()
     assert verdict(raw_limits=raw).code == 0
@@ -111,14 +103,11 @@ def test_gate_corrupt_limits_follows_fail_open_policy():
 
 
 @pytest.mark.parametrize("raw", ["null", "[]", "7"])
-@pytest.mark.xfail(strict=True, reason="BUG B2 (gate): valid-JSON non-object limits.json raises AttributeError "
-                                       "(exit 1) instead of following fail_open_when_no_data")
 def test_gate_non_object_limits(raw):
     r = gate(raw_limits=raw, config={"peak_hour_gate_enabled": False})
     assert r.returncode in (0, 10) and r.stderr == ""
 
 
-@pytest.mark.xfail(strict=True, reason="BUG B1 (gate): string used_percentage raises TypeError (exit 1)")
 def test_gate_string_pct():
     r = gate({"five_hour": {"used_percentage": "50", "resets_at": NOW + 7200}},
              config={"peak_hour_gate_enabled": False})
@@ -170,8 +159,6 @@ def test_ratio_below_5pp_is_insufficient_not_divide_by_zero():
     assert r.returncode == NO_DATA and r.stderr == ""
 
 
-@pytest.mark.xfail(strict=True, reason="BUG B4: --ratio sorts by s['ts'] with no default; a sample lacking 'ts' "
-                                       "raises KeyError (exit 1) while every other reader tolerates it")
 def test_ratio_sample_without_ts():
     h = _pair(1, 9, 0, 30, 0, 6) + [{"pct": 5, "sd_pct": 1, "resets_at": 1, "sd_resets": 9}]
     r = ratio(h)
